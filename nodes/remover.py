@@ -23,6 +23,22 @@ class LamaRemover:
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "lama_remover"
 
+    def normalize_input(self, tensor):
+        """確保輸入張量在正確的範圍內 [0, 1]"""
+        if tensor.max() > 1.0:
+            tensor = tensor / 255.0
+        return tensor.float()  # 確保是 float32
+
+    def denormalize_output(self, tensor):
+        """將輸出張量轉換到正確範圍並處理精度問題"""
+        # 處理 FP16/TensorRT 可能的數值異常
+        tensor = torch.nan_to_num(tensor, nan=0.0, posinf=1.0, neginf=0.0)
+
+        # 確保數值在合理範圍內
+        tensor = torch.clamp(tensor, 0, 1)
+
+        return tensor
+
     def lama_remover(self, images, masks, mask_threshold, gaussblur_radius, invert_mask):
         mylama = model.BigLama()
         ten2pil = transforms.ToPILImage()
@@ -31,16 +47,20 @@ class LamaRemover:
 
         for image, mask in zip(images, masks):
             ori_image = tensor2pil(image)
-            print(f"input image size :{ori_image.size}")
+            print(f"input image size: {ori_image.size}")
 
             w, h = ori_image.size
             p_image = padimage(ori_image)
             pt_image = pil2tensor(p_image)
 
+            # 確保輸入圖像在正確範圍內
+            pt_image = self.normalize_input(pt_image)
+            print(f"Normalized image range: [{pt_image.min().item():.4f}, {pt_image.max().item():.4f}]")
+
             mask = mask.unsqueeze(0)
             ori_mask = ten2pil(mask)
             ori_mask = ori_mask.convert('L')
-            print(f"input mask size :{ori_mask.size}")
+            print(f"input mask size: {ori_mask.size}")
 
             p_mask = padmask(ori_mask)
 
@@ -49,53 +69,52 @@ class LamaRemover:
                 p_mask = p_mask.resize(p_image.size)
 
             # invert mask
-            # 反转遮罩
             if not invert_mask:
                 p_mask = ImageOps.invert(p_mask)
 
             # gaussian Blur
-            # 高斯模糊遮罩（模糊的是白色）
             p_mask = p_mask.filter(ImageFilter.GaussianBlur(radius=gaussblur_radius))
 
             # mask_threshold
-            # 遮罩阈值，越大越强
             gray = p_mask.point(lambda x: 0 if x > mask_threshold else 255)
 
             pt_mask = pil2tensor(gray)
+            # 確保遮罩在正確範圍內
+            pt_mask = self.normalize_input(pt_mask)
+            print(f"Normalized mask range: [{pt_mask.min().item():.4f}, {pt_mask.max().item():.4f}]")
 
-            # lama
-            # lama模型
+            # lama 模型推理
             result = mylama(pt_image, pt_mask)
 
-            # 修復：處理 4 維 tensor，移除 batch 維度
-            print(f"Result tensor shape: {result.shape}")
+            # 處理 TensorRT 輸出的維度和數值問題
+            print(f"Raw result shape: {result.shape}")
+            print(f"Raw result range: [{result.min().item():.4f}, {result.max().item():.4f}]")
+            print(f"Raw result dtype: {result.dtype}")
+
+            # 移除 batch 維度
             if result.dim() == 4:
-                # 如果是 4 維 (batch, channel, height, width)，取第一個 batch
-                result = result.squeeze(0)  # 或者使用 result[0]
+                result = result.squeeze(0)
             elif result.dim() == 3 and result.shape[0] == 1:
-                # 如果是 3 維但第一維是 1，也移除它
                 result = result.squeeze(0)
 
-            print(f"Processed result tensor shape: {result.shape}")
+            # 轉換到 CPU 並確保是 float32
+            result = result.cpu().float()
 
-            # 確保 tensor 數值範圍正確（ToPILImage 期望 [0,1] 或 [0,255]）
-            if result.max() <= 1.0:
-                # 如果數值在 [0,1] 範圍內，保持不變
-                pass
-            else:
-                # 如果數值超過 1，將其標準化到 [0,1]
-                result = torch.clamp(result, 0, 1)
+            # 處理 FP16 轉換可能的數值問題
+            result = self.denormalize_output(result)
 
+            print(f"Processed result shape: {result.shape}")
+            print(f"Processed result range: [{result.min().item():.4f}, {result.max().item():.4f}]")
+
+            # 轉換為 PIL 圖像
             img_result = ten2pil(result)
 
             # crop into the original size
-            # 裁剪成输入大小
             x, y = img_result.size
             if x > w or y > h:
                 img_result = cropimage(img_result, w, h)
 
             # turn to comfyui tensor
-            # 变成comfyui格式（i,h,w,c）
             i = pil2comfy(img_result)
             results.append(i)
 
@@ -120,6 +139,22 @@ class LamaRemoverIMG:
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "lama_remover_IMG"
 
+    def normalize_input(self, tensor):
+        """確保輸入張量在正確的範圍內 [0, 1]"""
+        if tensor.max() > 1.0:
+            tensor = tensor / 255.0
+        return tensor.float()  # 確保是 float32
+
+    def denormalize_output(self, tensor):
+        """將輸出張量轉換到正確範圍並處理精度問題"""
+        # 處理 FP16/TensorRT 可能的數值異常
+        tensor = torch.nan_to_num(tensor, nan=0.0, posinf=1.0, neginf=0.0)
+
+        # 確保數值在合理範圍內
+        tensor = torch.clamp(tensor, 0, 1)
+
+        return tensor
+
     def lama_remover_IMG(self, images, masks, mask_threshold, gaussblur_radius, invert_mask):
         mylama = model.BigLama()
         ten2pil = transforms.ToPILImage()
@@ -128,16 +163,20 @@ class LamaRemoverIMG:
 
         for image, mask in zip(images, masks):
             ori_image = tensor2pil(image)
-            print(f"input image size :{ori_image.size}")
+            print(f"input image size: {ori_image.size}")
 
             w, h = ori_image.size
             p_image = padimage(ori_image)
             pt_image = pil2tensor(p_image)
 
+            # 確保輸入圖像在正確範圍內
+            pt_image = self.normalize_input(pt_image)
+            print(f"Normalized image range: [{pt_image.min().item():.4f}, {pt_image.max().item():.4f}]")
+
             mask = mask.movedim(0, -1).movedim(0, -1)
             ori_mask = ten2pil(mask)
             ori_mask = ori_mask.convert('L')
-            print(f"input mask size :{ori_mask.size}")
+            print(f"input mask size: {ori_mask.size}")
 
             p_mask = padmask(ori_mask)
 
@@ -146,53 +185,52 @@ class LamaRemoverIMG:
                 p_mask = p_mask.resize(p_image.size)
 
             # invert mask
-            # 反转遮罩
             if not invert_mask:
                 p_mask = ImageOps.invert(p_mask)
 
             # gaussian Blur
-            # 高斯模糊遮罩（模糊的是黑色所以需要反转操作）
             p_mask = p_mask.filter(ImageFilter.GaussianBlur(radius=gaussblur_radius))
 
             # mask_threshold
-            # 遮罩阈值，越大越强
             gray = p_mask.point(lambda x: 0 if x > mask_threshold else 255)
 
             pt_mask = pil2tensor(gray)
+            # 確保遮罩在正確範圍內
+            pt_mask = self.normalize_input(pt_mask)
+            print(f"Normalized mask range: [{pt_mask.min().item():.4f}, {pt_mask.max().item():.4f}]")
 
-            # lama
-            # lama模型
+            # lama 模型推理
             result = mylama(pt_image, pt_mask)
 
-            # 修復：處理 4 維 tensor，移除 batch 維度
-            print(f"Result tensor shape: {result.shape}")
+            # 處理 TensorRT 輸出的維度和數值問題
+            print(f"Raw result shape: {result.shape}")
+            print(f"Raw result range: [{result.min().item():.4f}, {result.max().item():.4f}]")
+            print(f"Raw result dtype: {result.dtype}")
+
+            # 移除 batch 維度
             if result.dim() == 4:
-                # 如果是 4 維 (batch, channel, height, width)，取第一個 batch
-                result = result.squeeze(0)  # 或者使用 result[0]
+                result = result.squeeze(0)
             elif result.dim() == 3 and result.shape[0] == 1:
-                # 如果是 3 維但第一維是 1，也移除它
                 result = result.squeeze(0)
 
-            print(f"Processed result tensor shape: {result.shape}")
+            # 轉換到 CPU 並確保是 float32
+            result = result.cpu().float()
 
-            # 確保 tensor 數值範圍正確（ToPILImage 期望 [0,1] 或 [0,255]）
-            if result.max() <= 1.0:
-                # 如果數值在 [0,1] 範圍內，保持不變
-                pass
-            else:
-                # 如果數值超過 1，將其標準化到 [0,1]
-                result = torch.clamp(result, 0, 1)
+            # 處理 FP16 轉換可能的數值問題
+            result = self.denormalize_output(result)
 
+            print(f"Processed result shape: {result.shape}")
+            print(f"Processed result range: [{result.min().item():.4f}, {result.max().item():.4f}]")
+
+            # 轉換為 PIL 圖像
             img_result = ten2pil(result)
 
             # crop into the original size
-            # 裁剪成输入大小
             x, y = img_result.size
             if x > w or y > h:
                 img_result = cropimage(img_result, w, h)
 
             # turn to comfyui tensor
-            # 变成comfyui格式（i,h,w,c）
             i = pil2comfy(img_result)
             results.append(i)
 
