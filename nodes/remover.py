@@ -15,7 +15,7 @@ from ..lama import model
 MODEL_INPUT_SIZE = 512  # LaMa 模型的標準輸入尺寸
 DEFAULT_MASK_THRESHOLD = 128
 DEFAULT_BLUR_RADIUS = 10
-MAX_BATCH_SIZE = 4  # RTX 3090 的最佳批處理大小
+MAX_BATCH_SIZE = 1
 
 # --- [極限效能融合] ---
 try:
@@ -106,102 +106,7 @@ class LamaModelManager:
 model_manager = LamaModelManager()
 
 
-# --- [圖像變換記錄] ---
-class ImageTransformInfo:
-    """記錄圖像變換信息，用於精確的填充與裁切"""
-
-    def __init__(self, original_h: int, original_w: int,
-                 scaled_h: int, scaled_w: int,
-                 x_offset: int, y_offset: int):
-        self.original_h = original_h
-        self.original_w = original_w
-        self.scaled_h = scaled_h
-        self.scaled_w = scaled_w
-        self.x_offset = x_offset
-        self.y_offset = y_offset
-
-
-# --- [高品質圖像處理器] ---
-class HighQualityImageProcessor:
-    """
-    專業級圖像處理器，實現保持長寬比的填充與裁切
-    """
-
-    @staticmethod
-    def get_interpolation_mode(mode_str: str):
-        """獲取插值模式"""
-        if mode_str == "BICUBIC":
-            return transforms.InterpolationMode.BICUBIC
-        else:
-            return transforms.InterpolationMode.BILINEAR
-
-    @staticmethod
-    def pad_to_square(image: torch.Tensor, target_size: int = MODEL_INPUT_SIZE,
-                      interpolation_mode=transforms.InterpolationMode.BICUBIC) -> Tuple[torch.Tensor, ImageTransformInfo]:
-        """
-        將圖像填充為正方形，保持長寬比
-        返回：(填充後的圖像, 變換信息)
-        """
-        # 輸入: (C, H, W)
-        _, original_h, original_w = image.shape
-
-        # 計算縮放比例，使最長邊等於target_size
-        scale = target_size / max(original_h, original_w)
-        scaled_h = int(original_h * scale)
-        scaled_w = int(original_w * scale)
-
-        # 縮放圖像，保持長寬比
-        image_scaled = transforms.functional.resize(
-            image.unsqueeze(0), (scaled_h, scaled_w),
-            interpolation=interpolation_mode,
-            antialias=True
-        ).squeeze(0)
-
-        # 計算填充位置（居中）
-        x_offset = (target_size - scaled_w) // 2
-        y_offset = (target_size - scaled_h) // 2
-
-        # 創建黑色背景並填充
-        padded_image = torch.zeros(image.shape[0], target_size, target_size,
-                                   dtype=image.dtype, device=image.device)
-        padded_image[:, y_offset:y_offset + scaled_h, x_offset:x_offset + scaled_w] = image_scaled
-
-        # 記錄變換信息
-        transform_info = ImageTransformInfo(
-            original_h, original_w, scaled_h, scaled_w, x_offset, y_offset
-        )
-
-        return padded_image, transform_info
-
-    @staticmethod
-    def crop_and_restore(result: torch.Tensor, transform_info: ImageTransformInfo,
-                         interpolation_mode=transforms.InterpolationMode.BICUBIC) -> torch.Tensor:
-        """
-        從結果中裁切出有效區域並恢復到原始尺寸
-        """
-        # 輸入: (C, H, W) 或 (1, C, H, W)
-        if result.dim() == 4:
-            result = result.squeeze(0)  # 移除batch維度
-
-        # 裁切出有效區域
-        y_start = transform_info.y_offset
-        y_end = transform_info.y_offset + transform_info.scaled_h
-        x_start = transform_info.x_offset
-        x_end = transform_info.x_offset + transform_info.scaled_w
-
-        cropped = result[:, y_start:y_end, x_start:x_end]
-
-        # 縮放回原始尺寸
-        restored = transforms.functional.resize(
-            cropped.unsqueeze(0),
-            (transform_info.original_h, transform_info.original_w),
-            interpolation=interpolation_mode,
-            antialias=True
-        ).squeeze(0)
-
-        return restored
-
-
+# --- [內存池管理器] ---
 class TensorPool:
     """
     張量內存池，重用張量以減少內存分配開銷
@@ -344,14 +249,6 @@ class LamaRemover:
                     "default": False,
                     "tooltip": "啟用性能監控（會輕微影響性能）"
                 }),
-                "aggressive_normalization": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "啟用激進正規化（僅在輸出過暗/過曝時使用）"
-                }),
-                "interpolation_mode": (["BICUBIC", "BILINEAR"], {
-                    "default": "BICUBIC",
-                    "tooltip": "插值演算法：BICUBIC品質更佳，BILINEAR速度更快"
-                }),
             },
         }
 
@@ -425,17 +322,12 @@ class LamaRemover:
         return True
 
     def _prepare_batch_tensors(self, images: torch.Tensor, masks: torch.Tensor,
-                               batch_indices: List[int], is_image_mask: bool = False,
-                               interpolation_mode_str: str = "BICUBIC") -> Tuple[torch.Tensor, torch.Tensor, List[ImageTransformInfo]]:
-        """
-        準備批處理張量 - 使用保持長寬比的填充策略
-        返回：(批處理圖像, 批處理遮罩, 變換信息列表)
-        """
+                               batch_indices: List[int], is_image_mask: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+        """準備批處理張量"""
         self._initialize_tensor_pool()
 
         batch_size = len(batch_indices)
         device = model_manager.device
-        interpolation_mode = HighQualityImageProcessor.get_interpolation_mode(interpolation_mode_str)
 
         # 從池中獲取或創建張量
         batch_images = self.tensor_pool.get_tensor(
@@ -445,55 +337,53 @@ class LamaRemover:
             (batch_size, 1, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE)
         )
 
-        transform_infos = []
-
         # 填充批處理數據
         for i, idx in enumerate(batch_indices):
-            # 處理圖像 - 保持長寬比的填充
-            image = images[idx].permute(2, 0, 1)  # HWC -> CHW
-
-            # 【關鍵改進】使用保持長寬比的填充
-            padded_image, transform_info = HighQualityImageProcessor.pad_to_square(
-                image, MODEL_INPUT_SIZE, interpolation_mode
+            # 處理圖像
+            image = images[idx].permute(2, 0, 1).unsqueeze(0)  # HWC -> BCHW
+            image_resized = transforms.functional.resize(
+                image, (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE),
+                interpolation=transforms.InterpolationMode.BILINEAR,
+                antialias=True
             )
+            batch_images[i] = image_resized.squeeze(0).to(device)
 
-            batch_images[i] = padded_image.to(device)
-            transform_infos.append(transform_info)
-
-            print(f"🖼️  圖像 {idx}: {transform_info.original_h}x{transform_info.original_w} → "
-                  f"{transform_info.scaled_h}x{transform_info.scaled_w} (填充到 {MODEL_INPUT_SIZE}x{MODEL_INPUT_SIZE})")
-
-            # 處理遮罩 - 同樣使用保持長寬比的邏輯
+            # 處理遮罩 - 區分 MASK 和 IMAGE 類型
             mask = masks[idx]
 
             if is_image_mask:
                 # IMAGE 類型遮罩 (H, W, C) - 需要轉換為灰階
                 if mask.ndim == 3 and mask.shape[2] > 1:
+                    # 如果是彩色圖像，轉換為灰階（使用亮度公式）
+                    # RGB to Grayscale: 0.299*R + 0.587*G + 0.114*B
                     if mask.shape[2] >= 3:
                         mask = 0.299 * mask[:, :, 0] + 0.587 * mask[:, :, 1] + 0.114 * mask[:, :, 2]
                     else:
+                        # 如果只有一個通道，直接使用
                         mask = mask[:, :, 0]
                 elif mask.ndim == 3 and mask.shape[2] == 1:
+                    # 單通道 IMAGE
                     mask = mask[:, :, 0]
-                print(f"🎭 IMAGE 類型遮罩處理完成，形狀: {mask.shape}")
+                # 如果已經是 2D，保持不變
+                print(f"🖼️  IMAGE 類型遮罩處理完成，形狀: {mask.shape}")
             else:
-                # MASK 類型遮罩 (H, W)
+                # MASK 類型遮罩 (H, W) - 原始邏輯
                 if mask.ndim == 3:
-                    mask = mask[:, :, 0]
+                    mask = mask[:, :, 0]  # 取第一個通道（不應該發生，但保險起見）
                 print(f"🎭 MASK 類型遮罩處理完成，形狀: {mask.shape}")
 
-            # 對遮罩應用相同的填充邏輯
-            mask_chw = mask.unsqueeze(0)  # HW -> CHW
-            padded_mask, _ = HighQualityImageProcessor.pad_to_square(
-                mask_chw, MODEL_INPUT_SIZE, transforms.InterpolationMode.NEAREST  # 遮罩用最近鄰
+            # 統一處理：轉換為 BCHW 格式
+            mask = mask.unsqueeze(0).unsqueeze(0)  # HW -> BCHW
+            mask_resized = transforms.functional.resize(
+                mask, (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE),
+                interpolation=transforms.InterpolationMode.NEAREST
             )
-
-            batch_masks[i] = padded_mask.to(device)
+            batch_masks[i] = mask_resized.squeeze(0).to(device)
 
             # 調試信息
-            print(f"📊 樣本 {idx}: 遮罩值範圍 [{padded_mask.min().item():.3f}, {padded_mask.max().item():.3f}]")
+            print(f"📊 樣本 {idx}: 遮罩值範圍 [{mask_resized.min().item():.3f}, {mask_resized.max().item():.3f}]")
 
-        return batch_images, batch_masks, transform_infos
+        return batch_images, batch_masks
 
     def _postprocess_results(self, results: torch.Tensor, original_shapes: List[Tuple[int, int]],
                              batch_indices: List[int]) -> List[torch.Tensor]:
@@ -524,14 +414,10 @@ class LamaRemover:
     def lama_remover(self, images: torch.Tensor, masks: torch.Tensor,
                      mask_threshold: int, gaussblur_radius: int, invert_mask: bool,
                      batch_size: int = 1, enable_performance_monitor: bool = False,
-                     aggressive_normalization: bool = False, interpolation_mode: str = "BICUBIC",
                      is_image_mask: bool = False):
         """
-        【專業級品質版本】極限優化的核心處理函式
-        新增品質改進：
-        - 保持長寬比的填充與裁切
-        - 可選的正規化策略
-        - BICUBIC高品質插值
+        優化的核心處理函式
+        is_image_mask: True 表示 masks 是 IMAGE 類型，False 表示是 MASK 類型
         """
         # 輸入驗證
         if not self._validate_inputs(images, masks, is_image_mask):
@@ -545,9 +431,10 @@ class LamaRemover:
             num_images = images.shape[0]
             results = []
 
+            # 記錄原始形狀
+            original_shapes = [(images.shape[1], images.shape[2])] * num_images
+
             print(f"🎯 處理模式: {'IMAGE 類型遮罩' if is_image_mask else 'MASK 類型遮罩'}")
-            print(f"🎨 插值模式: {interpolation_mode}")
-            print(f"🔧 正規化策略: {'激進拉伸' if aggressive_normalization else '溫和鉗位'}")
 
             # 批處理循環
             for start_idx in range(0, num_images, batch_size):
@@ -557,10 +444,10 @@ class LamaRemover:
 
                 with monitor(f"批次 {start_idx // batch_size + 1}/{(num_images - 1) // batch_size + 1}"):
                     try:
-                        # 【品質改進】準備批處理數據 - 使用保持長寬比的填充
-                        with monitor("高品質數據準備"):
-                            batch_images, batch_masks, transform_infos = self._prepare_batch_tensors(
-                                images, masks, batch_indices, is_image_mask, interpolation_mode
+                        # 準備批處理數據 - 傳遞遮罩類型標誌
+                        with monitor("數據準備"):
+                            batch_images, batch_masks = self._prepare_batch_tensors(
+                                images, masks, batch_indices, is_image_mask
                             )
 
                         # 遮罩預處理
@@ -579,23 +466,23 @@ class LamaRemover:
                         # 模型推理
                         with monitor("TensorRT 推理"):
                             with torch.no_grad():
-                                # 調試：顯示輸入數值範圍
+                                # 調試：顯示輸入數值範圍（保留原版邏輯）
                                 print(f"📊 輸入圖片數值範圍: [{batch_images.min().item():.4f}, {batch_images.max().item():.4f}]")
                                 print(f"📊 輸入遮罩數值範圍: [{batch_masks.min().item():.4f}, {batch_masks.max().item():.4f}]")
 
                                 batch_results = model_manager.model(batch_images, batch_masks)
-                                torch.cuda.synchronize()
+                                torch.cuda.synchronize()  # 確保 GPU 操作完成
 
-                        # 【品質改進】結果後處理
-                        with monitor("高品質結果後處理"):
-                            # 【選擇性正規化】根據用戶設定選擇策略
-                            batch_results = self._normalize_tensorrt_output(
-                                batch_results, aggressive_normalization
-                            )
+                        # 結果後處理
+                        with monitor("結果後處理"):
+                            # 手動歸一化 TensorRT 的輸出（關鍵！維持原版邏輯）
+                            # ⚠️ 重要：TensorRT 輸出範圍可能不是 [0, 1]，必須先正確歸一化避免過曝
+                            # 原版邏輯：min-max normalization + clamp，不可簡化！
+                            batch_results = self._normalize_tensorrt_output(batch_results)
 
-                            # 【精確恢復】使用裁切和縮放恢復原始尺寸
+                            # 處理每個結果
                             processed = self._postprocess_results(
-                                batch_results, transform_infos, batch_indices, interpolation_mode
+                                batch_results, original_shapes, batch_indices
                             )
                             results.extend(processed)
 
