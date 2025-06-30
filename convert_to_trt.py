@@ -1,4 +1,5 @@
 # convert_to_trt_TensorRT10x_optimized.py (針對 TensorRT 10.x 和 RTX 3090 的優化版本)
+# 版本 2: 修改為支援動態尺寸 (Dynamic Shape) 以便使用 Padding 策略
 import tensorrt as trt
 import os
 import sys
@@ -16,7 +17,8 @@ ONNX_PATH = './ckpts/lama_fp32.onnx'
 
 # ComfyUI TRT 模型目錄設定
 TRT_MODEL_DIR = '/root/ComfyUI/models/trt'
-ENGINE_FILENAME = f'lama_fp16_rtx3090_trt{major_version}x_static_bs1.trt'
+# --- MODIFIED: 更改引擎檔案名稱以反映動態尺寸特性 ---
+ENGINE_FILENAME = f'lama_fp16_rtx3090_trt{major_version}x_dynamic.trt'
 ENGINE_PATH = os.path.join(TRT_MODEL_DIR, ENGINE_FILENAME)
 
 WORKSPACE_GB = 12  # RTX 3090 的 24GB VRAM 可以使用較大工作空間
@@ -149,25 +151,37 @@ for i in range(network.num_outputs):
     tensor = network.get_output(i)
     print(f"  輸出層 {i}: 名稱={tensor.name}, 形狀={tensor.shape}, 型別={tensor.dtype}")
 
-# --- 設定最佳化設定檔 ---
+# --- MODIFIED: 設定最佳化設定檔 (改為動態尺寸) ---
+print("\n--- 動態尺寸最佳化設定檔 (支援 Padding 策略) ---")
 profile = builder.create_optimization_profile()
 
-# 固定尺寸設定 (批次大小為 1，專為單張圖片處理優化)
-fixed_shape = (1, 3, 512, 512)
-mask_shape = (1, 1, 512, 512)
-mask_input_name = "mask"
+# 為 "image" 輸入定義尺寸範圍 (Batch, Channels, Height, Width)
+# 注意：長寬最好是 8 的倍數
+min_shape = (1, 3, 256, 256)      # 最小可處理尺寸
+opt_shape = (1, 3, 1024, 1024)      # 預期最佳性能的尺寸
+max_shape = (1, 3, 2560, 2560)    # 最大可處理尺寸 (RTX 3090 可設更高)
 
-profile.set_shape("image", min=fixed_shape, opt=fixed_shape, max=fixed_shape)
-profile.set_shape(mask_input_name, min=mask_shape, opt=mask_shape, max=mask_shape)
+# 為 "mask" 輸入定義對應的尺寸範圍
+mask_min_shape = (1, 1, 256, 256)
+mask_opt_shape = (1, 1, 1024, 1024)
+mask_max_shape = (1, 1, 2560, 2560)
+mask_input_name = "mask" # 確保與您模型輸入名稱一致
+
+profile.set_shape("image", min=min_shape, opt=opt_shape, max=max_shape)
+profile.set_shape(mask_input_name, min=mask_min_shape, opt=mask_opt_shape, max=mask_max_shape)
 config.add_optimization_profile(profile)
 
-print("\n--- 靜態尺寸最佳化設定檔 ---")
-print(f"✓ 已為輸入 'image' 和 '{mask_input_name}' 設定靜態批次 (Batch Size = 1)")
-print(f"  - 此引擎被高度特化，專為處理單張 512x512 圖片，以達到最低延遲。")
+print(f"✓ 已為輸入 'image' 和 '{mask_input_name}' 設定動態尺寸")
+print(f"  - 最小尺寸: {min_shape}")
+print(f"  - 最佳尺寸: {opt_shape}")
+print(f"  - 最大尺寸: {max_shape}")
+print(f"  - 此引擎將能處理此範圍內的任意尺寸，適合 Padding 策略。")
+
 
 # --- 建構引擎 ---
 print("\n正在建構 TensorRT 引擎...")
 print("TensorRT 10.x 會自動為您的 RTX 3090 選擇最快的核心...")
+print("建構動態尺寸引擎可能需要幾分鐘時間，請耐心等候...")
 
 serialized_engine = builder.build_serialized_network(network, config)
 
@@ -224,14 +238,15 @@ print(f"   📄 {ENGINE_FILENAME}")
 print("\n✅ 優化特點:")
 print("  🚀 FP16 加速: 充分利用 Ampere 架構的第三代 Tensor Cores")
 print("  ⚡ TF32 自動啟用: TensorRT 10.x 在 RTX 3090 上的預設行為")
-print("  🎯 最低延遲: 透過靜態尺寸設定，專為單張圖片處理優化")
+print("  🤸 **尺寸靈活性**: 透過動態尺寸設定，可處理不同解析度，支援 Padding 策略") # MODIFIED
 print("  🆕 現代化: 使用 TensorRT 10.x 的最新優化技術")
 print(f"  📈 預期性能: RTX 3090 上約 2-3x 加速 (相較於原始 FP32)")
 
 print(f"\n💡 在 ComfyUI 中使用:")
 print(f"  1. 引擎檔案已放置在正確的 TRT 模型目錄中")
-print(f"  2. ComfyUI LaMa Remover 節點應該能自動識別此引擎")
-print(f"  3. 選擇使用 TensorRT 推理模式以獲得最佳性能")
+print(f"  2. **重要**: 您需要修改 ComfyUI 節點的 Python 程式碼，將圖片預處理從『強制縮放』改為『Padding』，以利用此引擎的動態特性。")
+print(f"  3. ComfyUI LaMa Remover 節點應該能自動識別此引擎")
+print(f"  4. 選擇使用 TensorRT 推理模式以獲得最佳性能")
 
 # 驗證 TF32 狀態的額外資訊
 print(f"\n🔧 TF32 狀態確認:")
@@ -243,5 +258,5 @@ print(f"  - 您將自動獲得 TF32 的性能優勢")
 print(f"\n📝 技術細節:")
 print(f"  - 工作空間: {WORKSPACE_GB}GB (充分利用 RTX 3090 的 24GB VRAM)")
 print(f"  - 批次大小: 1 (專為 ComfyUI 單張圖片處理優化)")
-print(f"  - 輸入解析度: 512x512 (靜態優化)")
+print(f"  - 輸入解析度: 動態 (Min: {min_shape[2]}x{min_shape[3]}, Opt: {opt_shape[2]}x{opt_shape[3]}, Max: {max_shape[2]}x{max_shape[3]})") # MODIFIED
 print(f"  - 精度模式: FP16 + 自動 TF32")

@@ -79,7 +79,7 @@ class BigLama:
         # 定義可能的檔案名稱（按優先級排序）
         possible_filenames = [
             # 1. 最新生成的檔案（包含版本資訊）
-            f"lama_fp16_rtx3090_trt{major_version}x_static_bs1.trt",
+            f"lama_fp16_rtx3090_trt{major_version}x_dynamic.trt",
 
             # 2. 其他常見的檔案名稱
             "lama_fp16_rtx3090_static_bs1.trt",
