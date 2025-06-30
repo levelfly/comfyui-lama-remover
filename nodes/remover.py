@@ -88,7 +88,6 @@ class LamaRemover:
     FUNCTION = "lama_remover"
 
     def lama_remover(self, images, masks, mask_threshold, gaussblur_radius, invert_mask):
-        # [修改] 從全局管理器獲取模型和設備
         mylama, device = get_shared_model()
         ten2pil = transforms.ToPILImage()
 
@@ -112,29 +111,22 @@ class LamaRemover:
             if not invert_mask:
                 p_mask = ImageOps.invert(p_mask)
 
-            # --- [修改] 高斯模糊邏輯，整合 CUDA 加速 ---
             if gaussblur_radius > 0:
-                # 優先使用 CUDA 核心 (如果可用且模型在 GPU 上)
                 if LAMA_CPP_AVAILABLE and device.type == 'cuda':
-                    # 1. 將 PIL 遮罩轉為 Tensor，並送到 GPU
                     mask_tensor = pil2tensor(p_mask).to(device)
-                    # 2. 執行 CUDA 模糊
                     blurred_mask_tensor = custom_cuda_blur.gaussian_blur(mask_tensor, gaussblur_radius)
-                    # 3. 將結果轉回 PIL Image 以進行後續處理
                     p_mask = ten2pil(blurred_mask_tensor.cpu().squeeze(0))
                 else:
-                    # 備援方案：使用 Pillow 的 CPU 模糊
                     p_mask = p_mask.filter(ImageFilter.GaussianBlur(radius=gaussblur_radius))
 
-            # 遮罩閾值
             gray = p_mask.point(lambda x: 0 if x > mask_threshold else 255)
             pt_mask = pil2tensor(gray)
 
-            # LaMa 模型推理
             result = mylama(pt_image, pt_mask)
-            img_result = ten2pil(result)
 
-            # 裁剪成輸入大小
+            # --- [修正] 在這裡移除批次維度 ---
+            img_result = ten2pil(result.squeeze(0))
+
             x, y = img_result.size
             if x > w or y > h:
                 img_result = cropimage(img_result, w, h)
@@ -164,7 +156,6 @@ class LamaRemoverIMG:
     FUNCTION = "lama_remover_IMG"
 
     def lama_remover_IMG(self, images, masks, mask_threshold, gaussblur_radius, invert_mask):
-        # [修改] 同樣從全局管理器獲取模型和設備
         mylama, device = get_shared_model()
         ten2pil = transforms.ToPILImage()
 
@@ -176,7 +167,6 @@ class LamaRemoverIMG:
             p_image = padimage(ori_image)
             pt_image = pil2tensor(p_image)
 
-            # 處理 IMAGE 類型的遮罩
             mask = mask.movedim(0, -1).movedim(0, -1)
             ori_mask = ten2pil(mask)
             ori_mask = ori_mask.convert('L')
@@ -189,7 +179,6 @@ class LamaRemoverIMG:
             if not invert_mask:
                 p_mask = ImageOps.invert(p_mask)
 
-            # --- [修改] 高斯模糊邏輯，整合 CUDA 加速 (與上面完全相同) ---
             if gaussblur_radius > 0:
                 if LAMA_CPP_AVAILABLE and device.type == 'cuda':
                     mask_tensor = pil2tensor(p_mask).to(device)
@@ -198,15 +187,14 @@ class LamaRemoverIMG:
                 else:
                     p_mask = p_mask.filter(ImageFilter.GaussianBlur(radius=gaussblur_radius))
 
-            # 遮罩閾值
             gray = p_mask.point(lambda x: 0 if x > mask_threshold else 255)
             pt_mask = pil2tensor(gray)
 
-            # LaMa 模型推理
             result = mylama(pt_image, pt_mask)
-            img_result = ten2pil(result)
 
-            # 裁剪成輸入大小
+            # --- [修正] 在這裡移除批次維度 ---
+            img_result = ten2pil(result.squeeze(0))
+
             x, y = img_result.size
             if x > w or y > h:
                 img_result = cropimage(img_result, w, h)
