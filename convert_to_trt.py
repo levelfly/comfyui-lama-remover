@@ -63,8 +63,9 @@ config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, WORKSPACE_GB * (1 << 
 print(f"\n=== TensorRT {major_version}.x + Ampere 架構 (RTX 3090) 優化設定 ===")
 
 # 1. 啟用 FP16 模式
-config.set_flag(trt.BuilderFlag.FP16)
-print("✓ 已啟用 FP16 半精度浮點數模式")
+# config.set_flag(trt.BuilderFlag.FP16)
+# print("✓ 已啟用 FP16 半精度浮點數模式")
+print("ⓘ 已停用 FP16 模式，將建立 FP32 引擎以確保數值穩定性。")
 
 # 2. 檢查硬體支援
 if builder.platform_has_fast_fp16:
