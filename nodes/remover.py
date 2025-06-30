@@ -262,6 +262,41 @@ class LamaRemover:
         if self.tensor_pool is None:
             self.tensor_pool = TensorPool(model_manager.device)
 
+    def _normalize_tensorrt_output(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        正確歸一化 TensorRT 輸出，維持原版邏輯避免過曝
+        TensorRT 的輸出範圍可能不是標準的 [0, 1]，需要先做 min-max 歸一化
+        """
+        # 對每個樣本分別進行歸一化（批處理版本）
+        normalized_tensors = []
+
+        for i in range(tensor.shape[0]):
+            sample = tensor[i:i + 1]  # 保持維度 (1, C, H, W)
+
+            # 獲取當前樣本的最小值和最大值
+            min_val = torch.min(sample)
+            max_val = torch.max(sample)
+
+            # 調試信息：顯示 TensorRT 原始輸出範圍
+            print(f"🔍 樣本 {i + 1} TensorRT 原始輸出範圍: [{min_val.item():.4f}, {max_val.item():.4f}]")
+
+            # 避免除零錯誤：只有當 max > min 時才進行歸一化
+            if max_val > min_val:
+                # min-max 歸一化：將 [min, max] 映射到 [0, 1]
+                normalized_sample = (sample - min_val) / (max_val - min_val)
+                print(f"✅ 樣本 {i + 1} 歸一化後範圍: [0.0000, 1.0000]")
+            else:
+                # 如果 min == max，直接設為 0（避免 NaN）
+                normalized_sample = torch.zeros_like(sample)
+                print(f"⚠️  樣本 {i + 1} min==max，設為零值")
+
+            # 最終 clamp 確保嚴格在 [0, 1] 範圍內
+            normalized_sample = torch.clamp(normalized_sample, 0.0, 1.0)
+            normalized_tensors.append(normalized_sample)
+
+        # 合併所有歸一化後的樣本
+        return torch.cat(normalized_tensors, dim=0)
+
     def _validate_inputs(self, images: torch.Tensor, masks: torch.Tensor) -> bool:
         """驗證輸入張量"""
         if images.shape[0] != masks.shape[0]:
@@ -391,13 +426,19 @@ class LamaRemover:
                         # 模型推理
                         with monitor("TensorRT 推理"):
                             with torch.no_grad():
+                                # 調試：顯示輸入數值範圍（保留原版邏輯）
+                                print(f"📊 輸入圖片數值範圍: [{batch_images.min().item():.4f}, {batch_images.max().item():.4f}]")
+                                print(f"📊 輸入遮罩數值範圍: [{batch_masks.min().item():.4f}, {batch_masks.max().item():.4f}]")
+
                                 batch_results = model_manager.model(batch_images, batch_masks)
                                 torch.cuda.synchronize()  # 確保 GPU 操作完成
 
                         # 結果後處理
                         with monitor("結果後處理"):
-                            # 手動歸一化
-                            batch_results = torch.clamp(batch_results, 0.0, 1.0)
+                            # 手動歸一化 TensorRT 的輸出（關鍵！維持原版邏輯）
+                            # ⚠️ 重要：TensorRT 輸出範圍可能不是 [0, 1]，必須先正確歸一化避免過曝
+                            # 原版邏輯：min-max normalization + clamp，不可簡化！
+                            batch_results = self._normalize_tensorrt_output(batch_results)
 
                             # 處理每個結果
                             processed = self._postprocess_results(
