@@ -14,7 +14,7 @@ from ..lama import model
 
 # --- 常量定義 (MODIFIED) ---
 # MODEL_INPUT_SIZE 已被移除，因為我們不再使用固定尺寸
-PADDING_FACTOR = 8  # LaMa 模型通常要求輸入尺寸是 8 的倍數
+PADDING_FACTOR = 32  # LaMa 模型通常要求輸入尺寸是 8 的倍數
 DEFAULT_MASK_THRESHOLD = 128
 DEFAULT_BLUR_RADIUS = 10
 MAX_BATCH_SIZE = 1  # 對於動態尺寸，建議批次為 1 以簡化內存管理
