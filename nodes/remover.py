@@ -67,7 +67,7 @@ class LamaRemover:
             # lama模型
             result = mylama(pt_image, pt_mask)
 
-            img_result = ten2pil(result)
+            img_result = ten2pil(result.squeeze(0))
 
             # crop into the original size
             # 裁剪成输入大小
@@ -145,7 +145,7 @@ class LamaRemoverIMG:
             # lama模型
             result = mylama(pt_image, pt_mask)
 
-            img_result = ten2pil(result)
+            img_result = ten2pil(result.squeeze(0))
 
             # crop into the original size
             # 裁剪成输入大小
