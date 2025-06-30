@@ -104,7 +104,7 @@ model_manager = LamaModelManager()
 class BlurProcessor:
     # 為了 JIT 編譯，將其移出 LamaRemover 類別，使其成為可被編譯的獨立函數
     @staticmethod
-    @torch.compile(mode="reduce-overhead")
+    #@torch.compile(mode="reduce-overhead")
     def _pytorch_gaussian_blur(tensor: torch.Tensor, radius: int) -> torch.Tensor:
         kernel_size = 2 * radius + 1
         sigma = radius / 3.0
