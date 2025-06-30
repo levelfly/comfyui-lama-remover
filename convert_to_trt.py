@@ -18,7 +18,7 @@ ONNX_PATH = './ckpts/lama_fp32_dynamic.onnx'
 # ComfyUI TRT 模型目錄設定
 TRT_MODEL_DIR = '/root/ComfyUI/models/trt'
 # --- MODIFIED: 更改引擎檔案名稱以反映動態尺寸特性 ---
-ENGINE_FILENAME = f'lama_fp16_rtx3090_trt{major_version}x_dynamic.trt'
+ENGINE_FILENAME = f'lama_fp32_rtx3090_trt{major_version}x_dynamic.trt'
 ENGINE_PATH = os.path.join(TRT_MODEL_DIR, ENGINE_FILENAME)
 
 WORKSPACE_GB = 12  # RTX 3090 的 24GB VRAM 可以使用較大工作空間
