@@ -15,7 +15,7 @@ from ..lama import model
 MODEL_INPUT_SIZE = 512  # LaMa 模型的標準輸入尺寸
 DEFAULT_MASK_THRESHOLD = 128
 DEFAULT_BLUR_RADIUS = 10
-MAX_BATCH_SIZE = 1  # RTX 3090 的最佳批處理大小
+MAX_BATCH_SIZE = 1
 
 # --- [極限效能融合] ---
 try:
@@ -226,70 +226,6 @@ class LamaRemover:
     def __init__(self):
         self.tensor_pool = None  # 惰性初始化
 
-    def _smart_resize(self, image: torch.Tensor, target_size: Tuple[int, int],
-                      quality_mode: str = "high") -> torch.Tensor:
-        """
-        智能高質量縮放，減少模糊
-        """
-        original_size = (image.shape[-2], image.shape[-1])
-
-        # 如果已經是目標尺寸，直接返回
-        if original_size == target_size:
-            return image
-
-        if quality_mode == "ultra":
-            # 超高質量：Lanczos 插值
-            try:
-                return transforms.functional.resize(
-                    image, target_size,
-                    interpolation=transforms.InterpolationMode.LANCZOS,
-                    antialias=False  # 關鍵：避免過度平滑
-                )
-            except:
-                # 備援：BICUBIC
-                return transforms.functional.resize(
-                    image, target_size,
-                    interpolation=transforms.InterpolationMode.BICUBIC,
-                    antialias=False
-                )
-        elif quality_mode == "high":
-            # 高質量：BICUBIC 無抗鋸齒
-            return transforms.functional.resize(
-                image, target_size,
-                interpolation=transforms.InterpolationMode.BICUBIC,
-                antialias=False
-            )
-        else:
-            # 基本：原始方法（可能模糊）
-            return transforms.functional.resize(
-                image, target_size,
-                interpolation=transforms.InterpolationMode.BILINEAR,
-                antialias=True
-            )
-
-    def _unsharp_mask(self, image: torch.Tensor, strength: float = 0.3,
-                      radius: float = 1.0) -> torch.Tensor:
-        """
-        Unsharp Mask 銳化濾鏡，恢復細節
-        """
-        if strength <= 0:
-            return image
-
-        # 創建高斯模糊
-        kernel_size = int(radius * 4) + 1
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-
-        # 高斯模糊
-        blurred = F.gaussian_blur(image, kernel_size=(kernel_size, kernel_size),
-                                  sigma=(radius, radius))
-
-        # Unsharp Mask: original + strength * (original - blurred)
-        sharpened = image + strength * (image - blurred)
-
-        # 限制範圍
-        return torch.clamp(sharpened, 0.0, 1.0)
-
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -308,18 +244,6 @@ class LamaRemover:
                 "batch_size": ("INT", {
                     "default": 1, "min": 1, "max": MAX_BATCH_SIZE, "step": 1,
                     "tooltip": "批處理大小，RTX 3090 建議 2-4"
-                }),
-                "quality_mode": (["basic", "high", "ultra"], {
-                    "default": "high",
-                    "tooltip": "影像質量模式：basic(快速) / high(推薦) / ultra(最佳)"
-                }),
-                "enable_sharpening": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "啟用後處理銳化，減少模糊"
-                }),
-                "sharpening_strength": ("FLOAT", {
-                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.1,
-                    "tooltip": "銳化強度，0.3 為推薦值"
                 }),
                 "enable_performance_monitor": ("BOOLEAN", {
                     "default": False,
@@ -398,9 +322,8 @@ class LamaRemover:
         return True
 
     def _prepare_batch_tensors(self, images: torch.Tensor, masks: torch.Tensor,
-                               batch_indices: List[int], is_image_mask: bool = False,
-                               quality_mode: str = "high") -> Tuple[torch.Tensor, torch.Tensor]:
-        """準備批處理張量，使用高質量縮放"""
+                               batch_indices: List[int], is_image_mask: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+        """準備批處理張量"""
         self._initialize_tensor_pool()
 
         batch_size = len(batch_indices)
@@ -416,12 +339,12 @@ class LamaRemover:
 
         # 填充批處理數據
         for i, idx in enumerate(batch_indices):
-            # 處理圖像 - 使用高質量縮放
+            # 處理圖像
             image = images[idx].permute(2, 0, 1).unsqueeze(0)  # HWC -> BCHW
-
-            # 🔧 關鍵修改：使用智能高質量縮放
-            image_resized = self._smart_resize(
-                image, (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE), quality_mode
+            image_resized = transforms.functional.resize(
+                image, (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE),
+                interpolation=transforms.InterpolationMode.BILINEAR,
+                antialias=True
             )
             batch_images[i] = image_resized.squeeze(0).to(device)
 
@@ -449,11 +372,11 @@ class LamaRemover:
                     mask = mask[:, :, 0]  # 取第一個通道（不應該發生，但保險起見）
                 print(f"🎭 MASK 類型遮罩處理完成，形狀: {mask.shape}")
 
-            # 統一處理：轉換為 BCHW 格式 - 遮罩使用 NEAREST 插值保持清晰
+            # 統一處理：轉換為 BCHW 格式
             mask = mask.unsqueeze(0).unsqueeze(0)  # HW -> BCHW
             mask_resized = transforms.functional.resize(
                 mask, (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE),
-                interpolation=transforms.InterpolationMode.NEAREST  # 遮罩保持清晰
+                interpolation=transforms.InterpolationMode.NEAREST
             )
             batch_masks[i] = mask_resized.squeeze(0).to(device)
 
@@ -463,26 +386,20 @@ class LamaRemover:
         return batch_images, batch_masks
 
     def _postprocess_results(self, results: torch.Tensor, original_shapes: List[Tuple[int, int]],
-                             batch_indices: List[int], quality_mode: str = "high",
-                             enable_sharpening: bool = True, sharpening_strength: float = 0.3) -> List[torch.Tensor]:
-        """後處理結果張量，使用高質量縮放和銳化"""
+                             batch_indices: List[int]) -> List[torch.Tensor]:
+        """後處理結果張量"""
         processed_results = []
 
         for i, idx in enumerate(batch_indices):
             result = results[i:i + 1]  # 保持批次維度
             h, w = original_shapes[idx]
 
-            # 🔧 關鍵修改1：使用智能高質量縮放回原始尺寸
-            result_resized = self._smart_resize(result, (h, w), quality_mode)
-
-            # 🔧 關鍵修改2：可選的銳化處理，恢復細節
-            if enable_sharpening and sharpening_strength > 0:
-                result_resized = self._unsharp_mask(
-                    result_resized,
-                    strength=sharpening_strength,
-                    radius=1.0
-                )
-                print(f"✨ 樣本 {idx} 應用銳化 (強度: {sharpening_strength:.1f})")
+            # 縮放回原始尺寸
+            result_resized = transforms.functional.resize(
+                result, (h, w),
+                interpolation=transforms.InterpolationMode.BILINEAR,
+                antialias=True
+            )
 
             # 轉換為 ComfyUI 格式 (BCHW -> BHWC)
             result_comfy = result_resized.permute(0, 2, 3, 1).cpu()
@@ -496,14 +413,11 @@ class LamaRemover:
 
     def lama_remover(self, images: torch.Tensor, masks: torch.Tensor,
                      mask_threshold: int, gaussblur_radius: int, invert_mask: bool,
-                     batch_size: int = 1, quality_mode: str = "high",
-                     enable_sharpening: bool = True, sharpening_strength: float = 0.3,
-                     enable_performance_monitor: bool = False, is_image_mask: bool = False):
+                     batch_size: int = 1, enable_performance_monitor: bool = False,
+                     is_image_mask: bool = False):
         """
-        優化的核心處理函式，現在包含防模糊技術
-        quality_mode: "basic" | "high" | "ultra" - 影像質量模式
-        enable_sharpening: 是否啟用後處理銳化
-        sharpening_strength: 銳化強度 (0.0-1.0)
+        優化的核心處理函式
+        is_image_mask: True 表示 masks 是 IMAGE 類型，False 表示是 MASK 類型
         """
         # 輸入驗證
         if not self._validate_inputs(images, masks, is_image_mask):
@@ -521,7 +435,6 @@ class LamaRemover:
             original_shapes = [(images.shape[1], images.shape[2])] * num_images
 
             print(f"🎯 處理模式: {'IMAGE 類型遮罩' if is_image_mask else 'MASK 類型遮罩'}")
-            print(f"🎨 質量模式: {quality_mode} {'+ 銳化(' + str(sharpening_strength) + ')' if enable_sharpening else ''}")
 
             # 批處理循環
             for start_idx in range(0, num_images, batch_size):
@@ -531,10 +444,10 @@ class LamaRemover:
 
                 with monitor(f"批次 {start_idx // batch_size + 1}/{(num_images - 1) // batch_size + 1}"):
                     try:
-                        # 準備批處理數據 - 使用高質量縮放
+                        # 準備批處理數據 - 傳遞遮罩類型標誌
                         with monitor("數據準備"):
                             batch_images, batch_masks = self._prepare_batch_tensors(
-                                images, masks, batch_indices, is_image_mask, quality_mode
+                                images, masks, batch_indices, is_image_mask
                             )
 
                         # 遮罩預處理
@@ -560,17 +473,16 @@ class LamaRemover:
                                 batch_results = model_manager.model(batch_images, batch_masks)
                                 torch.cuda.synchronize()  # 確保 GPU 操作完成
 
-                        # 結果後處理 - 使用高質量縮放和銳化
+                        # 結果後處理
                         with monitor("結果後處理"):
                             # 手動歸一化 TensorRT 的輸出（關鍵！維持原版邏輯）
                             # ⚠️ 重要：TensorRT 輸出範圍可能不是 [0, 1]，必須先正確歸一化避免過曝
                             # 原版邏輯：min-max normalization + clamp，不可簡化！
                             batch_results = self._normalize_tensorrt_output(batch_results)
 
-                            # 處理每個結果 - 添加質量和銳化參數
+                            # 處理每個結果
                             processed = self._postprocess_results(
-                                batch_results, original_shapes, batch_indices,
-                                quality_mode, enable_sharpening, sharpening_strength
+                                batch_results, original_shapes, batch_indices
                             )
                             results.extend(processed)
 
@@ -614,9 +526,7 @@ class LamaRemoverIMG(LamaRemover):
 
     def lama_remover_img(self, images: torch.Tensor, masks: torch.Tensor,
                          mask_threshold: int, gaussblur_radius: int, invert_mask: bool,
-                         batch_size: int = 1, quality_mode: str = "high",
-                         enable_sharpening: bool = True, sharpening_strength: float = 0.3,
-                         enable_performance_monitor: bool = False):
+                         batch_size: int = 1, enable_performance_monitor: bool = False):
         """
         IMAGE 類型遮罩的處理入口，調用父類方法並標記遮罩類型
         """
@@ -627,9 +537,6 @@ class LamaRemoverIMG(LamaRemover):
             gaussblur_radius=gaussblur_radius,
             invert_mask=invert_mask,
             batch_size=batch_size,
-            quality_mode=quality_mode,
-            enable_sharpening=enable_sharpening,
-            sharpening_strength=sharpening_strength,
             enable_performance_monitor=enable_performance_monitor,
             is_image_mask=True  # 關鍵：標記為 IMAGE 類型遮罩
         )
