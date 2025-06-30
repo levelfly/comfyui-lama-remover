@@ -81,7 +81,6 @@ class LamaRemover:
 
             # 如果輸出尺寸與預期不符，調整回填充後的尺寸
             if result.shape[-2:] != (p_image.size[1], p_image.size[0]):  # (height, width)
-                from torchvision import transforms
                 target_h, target_w = p_image.size[1], p_image.size[0]
                 print(f"Resizing result from {result.shape[-2:]} to ({target_h}, {target_w})")
                 result = transforms.functional.resize(
