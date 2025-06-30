@@ -297,20 +297,32 @@ class LamaRemover:
         # 合併所有歸一化後的樣本
         return torch.cat(normalized_tensors, dim=0)
 
-    def _validate_inputs(self, images: torch.Tensor, masks: torch.Tensor) -> bool:
+    def _validate_inputs(self, images: torch.Tensor, masks: torch.Tensor, is_image_mask: bool = False) -> bool:
         """驗證輸入張量"""
         if images.shape[0] != masks.shape[0]:
             print(f"❌ 圖像和遮罩的批次大小不匹配: {images.shape[0]} vs {masks.shape[0]}")
             return False
 
-        if len(images.shape) != 4 or len(masks.shape) != 3:
-            print(f"❌ 輸入張量維度不正確: images {images.shape}, masks {masks.shape}")
+        # 檢查維度
+        if len(images.shape) != 4:
+            print(f"❌ 圖像張量維度不正確: {images.shape}，期望 4 維 (B,H,W,C)")
             return False
+
+        if is_image_mask:
+            # IMAGE 類型遮罩應該是 4 維 (B,H,W,C)
+            if len(masks.shape) != 4:
+                print(f"❌ IMAGE 類型遮罩張量維度不正確: {masks.shape}，期望 4 維 (B,H,W,C)")
+                return False
+        else:
+            # MASK 類型應該是 3 維 (B,H,W)
+            if len(masks.shape) != 3:
+                print(f"❌ MASK 類型遮罩張量維度不正確: {masks.shape}，期望 3 維 (B,H,W)")
+                return False
 
         return True
 
     def _prepare_batch_tensors(self, images: torch.Tensor, masks: torch.Tensor,
-                               batch_indices: List[int]) -> Tuple[torch.Tensor, torch.Tensor]:
+                               batch_indices: List[int], is_image_mask: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         """準備批處理張量"""
         self._initialize_tensor_pool()
 
@@ -336,16 +348,40 @@ class LamaRemover:
             )
             batch_images[i] = image_resized.squeeze(0).to(device)
 
-            # 處理遮罩
+            # 處理遮罩 - 區分 MASK 和 IMAGE 類型
             mask = masks[idx]
-            if mask.ndim == 3:
-                mask = mask[:, :, 0]  # 取第一個通道
+
+            if is_image_mask:
+                # IMAGE 類型遮罩 (H, W, C) - 需要轉換為灰階
+                if mask.ndim == 3 and mask.shape[2] > 1:
+                    # 如果是彩色圖像，轉換為灰階（使用亮度公式）
+                    # RGB to Grayscale: 0.299*R + 0.587*G + 0.114*B
+                    if mask.shape[2] >= 3:
+                        mask = 0.299 * mask[:, :, 0] + 0.587 * mask[:, :, 1] + 0.114 * mask[:, :, 2]
+                    else:
+                        # 如果只有一個通道，直接使用
+                        mask = mask[:, :, 0]
+                elif mask.ndim == 3 and mask.shape[2] == 1:
+                    # 單通道 IMAGE
+                    mask = mask[:, :, 0]
+                # 如果已經是 2D，保持不變
+                print(f"🖼️  IMAGE 類型遮罩處理完成，形狀: {mask.shape}")
+            else:
+                # MASK 類型遮罩 (H, W) - 原始邏輯
+                if mask.ndim == 3:
+                    mask = mask[:, :, 0]  # 取第一個通道（不應該發生，但保險起見）
+                print(f"🎭 MASK 類型遮罩處理完成，形狀: {mask.shape}")
+
+            # 統一處理：轉換為 BCHW 格式
             mask = mask.unsqueeze(0).unsqueeze(0)  # HW -> BCHW
             mask_resized = transforms.functional.resize(
                 mask, (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE),
                 interpolation=transforms.InterpolationMode.NEAREST
             )
             batch_masks[i] = mask_resized.squeeze(0).to(device)
+
+            # 調試信息
+            print(f"📊 樣本 {idx}: 遮罩值範圍 [{mask_resized.min().item():.3f}, {mask_resized.max().item():.3f}]")
 
         return batch_images, batch_masks
 
@@ -377,12 +413,14 @@ class LamaRemover:
 
     def lama_remover(self, images: torch.Tensor, masks: torch.Tensor,
                      mask_threshold: int, gaussblur_radius: int, invert_mask: bool,
-                     batch_size: int = 1, enable_performance_monitor: bool = False):
+                     batch_size: int = 1, enable_performance_monitor: bool = False,
+                     is_image_mask: bool = False):
         """
         優化的核心處理函式
+        is_image_mask: True 表示 masks 是 IMAGE 類型，False 表示是 MASK 類型
         """
         # 輸入驗證
-        if not self._validate_inputs(images, masks):
+        if not self._validate_inputs(images, masks, is_image_mask):
             return (images,)
 
         # 性能監控裝飾器
@@ -396,6 +434,8 @@ class LamaRemover:
             # 記錄原始形狀
             original_shapes = [(images.shape[1], images.shape[2])] * num_images
 
+            print(f"🎯 處理模式: {'IMAGE 類型遮罩' if is_image_mask else 'MASK 類型遮罩'}")
+
             # 批處理循環
             for start_idx in range(0, num_images, batch_size):
                 end_idx = min(start_idx + batch_size, num_images)
@@ -404,10 +444,10 @@ class LamaRemover:
 
                 with monitor(f"批次 {start_idx // batch_size + 1}/{(num_images - 1) // batch_size + 1}"):
                     try:
-                        # 準備批處理數據
+                        # 準備批處理數據 - 傳遞遮罩類型標誌
                         with monitor("數據準備"):
                             batch_images, batch_masks = self._prepare_batch_tensors(
-                                images, masks, batch_indices
+                                images, masks, batch_indices, is_image_mask
                             )
 
                         # 遮罩預處理
@@ -473,6 +513,7 @@ class LamaRemover:
 class LamaRemoverIMG(LamaRemover):
     """
     LamaRemover 的 IMAGE 輸入變體，繼承所有優化
+    專門處理 IMAGE 類型的遮罩輸入
     """
 
     @classmethod
@@ -481,7 +522,24 @@ class LamaRemoverIMG(LamaRemover):
         base_inputs["required"]["masks"] = ("IMAGE",)  # 改為 IMAGE 類型
         return base_inputs
 
-    FUNCTION = "lama_remover"
+    FUNCTION = "lama_remover_img"
+
+    def lama_remover_img(self, images: torch.Tensor, masks: torch.Tensor,
+                         mask_threshold: int, gaussblur_radius: int, invert_mask: bool,
+                         batch_size: int = 1, enable_performance_monitor: bool = False):
+        """
+        IMAGE 類型遮罩的處理入口，調用父類方法並標記遮罩類型
+        """
+        return self.lama_remover(
+            images=images,
+            masks=masks,
+            mask_threshold=mask_threshold,
+            gaussblur_radius=gaussblur_radius,
+            invert_mask=invert_mask,
+            batch_size=batch_size,
+            enable_performance_monitor=enable_performance_monitor,
+            is_image_mask=True  # 關鍵：標記為 IMAGE 類型遮罩
+        )
 
 
 # --- [工具函數] ---
