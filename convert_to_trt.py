@@ -7,7 +7,8 @@ ONNX_PATH = './ckpts/lama_fp32.onnx'
 ENGINE_PATH = './ckpts/lama_fp16_rtx3090.trt'  # RTX 3090 專用檔名
 WORKSPACE_GB = 8  # RTX 3090 有 24GB 記憶體，可以使用更大的 workspace
 
-print("--- TensorRT Engine Builder (FP16 Optimized) ---")
+print("--- TensorRT Engine Builder (FP16 Optimized for RTX 3090) ---")
+print(f"TensorRT version: {trt.__version__}")
 
 if not os.path.exists(ONNX_PATH):
     print(f"Error: ONNX model not found at {ONNX_PATH}")
@@ -35,21 +36,42 @@ if builder.platform_has_fast_fp16:
     # 3. 啟用 Tensor Core 優化
     config.set_flag(trt.BuilderFlag.PREFER_PRECISION_CONSTRAINTS)
 
-    # 4. 針對 Ampere 架構的額外優化
-    config.set_flag(trt.BuilderFlag.TF32)  # RTX 3090 支援 TF32
-    print("✓ TF32 enabled for better performance on Ampere")
+    # 4. 針對 Ampere 架構的 TF32 優化 (版本檢查)
+    try:
+        config.set_flag(trt.BuilderFlag.TF32)
+        print("✓ TF32 enabled for better performance on Ampere")
+    except AttributeError:
+        print("ⓘ TF32 not available in this TensorRT version")
 
-    # 5. 更積極的優化策略
-    config.set_flag(trt.BuilderFlag.GPU_FALLBACK)
+    # 5. GPU fallback 優化 (版本檢查)
+    try:
+        config.set_flag(trt.BuilderFlag.GPU_FALLBACK)
+        print("✓ GPU_FALLBACK enabled")
+    except AttributeError:
+        print("ⓘ GPU_FALLBACK not available in this TensorRT version")
 
 else:
     print("⚠ Warning: Cannot detect RTX 3090 properly")
 
-# 6. 設定多流處理（RTX 3090 有很多 CUDA cores）
-config.max_aux_streams = 4
+# 6. 設定多流處理（版本檢查）
+try:
+    config.max_aux_streams = 4
+    print("✓ Multi-stream processing enabled (4 streams)")
+except AttributeError:
+    print("ⓘ max_aux_streams not available in this TensorRT version")
 
-# 7. 嚴格類型約束
-config.set_flag(trt.BuilderFlag.STRICT_TYPES)
+# 7. 嚴格類型約束 (版本兼容性檢查)
+try:
+    # 較新的 TensorRT 版本
+    config.set_flag(trt.BuilderFlag.STRICT_TYPES)
+    print("✓ STRICT_TYPES enabled")
+except AttributeError:
+    # 較舊的 TensorRT 版本的替代方案
+    try:
+        config.set_flag(trt.BuilderFlag.STRICT_NANS)
+        print("✓ STRICT_NANS enabled (fallback)")
+    except AttributeError:
+        print("ⓘ Strict type flags not available in this TensorRT version")
 
 print(f"FP16 mode enabled: True")
 print(f"Strict types enabled: True")
