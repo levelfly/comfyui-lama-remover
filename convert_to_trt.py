@@ -1,15 +1,15 @@
-# convert_to_trt_fp16_tw.py (優化的 FP16 版本 - 繁體中文註解)
+# convert_to_trt_static_optimized.py (針對 RTX 3090 和固定單張圖片的最終優化版本)
 import tensorrt as trt
 import os
 
 # --- 設定 ---
 ONNX_PATH = './ckpts/lama_fp32.onnx'
-# 建議為繁中版本引擎取一個新檔名
-ENGINE_PATH = './ckpts/lama_fp16_rtx3090_tw.trt'
+# 檔名清楚標示其為 RTX 3090 專用、靜態 (static) 且批次為 1 (bs1)
+ENGINE_PATH = './ckpts/lama_fp16_rtx3090_static_bs1.trt'
 # RTX 3090 有 24GB VRAM，可設定較大的工作空間以利 TensorRT 搜尋最佳演算法
-WORKSPACE_GB = 8
+WORKSPACE_GB = 12
 
-print("--- TensorRT 引擎建構器 (針對 RTX 3090 的 FP16 優化) ---")
+print("--- TensorRT 引擎建構器 (針對 RTX 3090 和固定單張圖片的最終優化) ---")
 print(f"目前 TensorRT 版本: {trt.__version__}")
 
 if not os.path.exists(ONNX_PATH):
@@ -19,7 +19,6 @@ if not os.path.exists(ONNX_PATH):
 # --- 初始化 TensorRT 元件 ---
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING) # 設定日誌記錄器等級
 builder = trt.Builder(TRT_LOGGER)
-# 建立網路定義，EXPLICIT_BATCH 是現代 TensorRT 的標準做法
 network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
 config = builder.create_builder_config()
 parser = trt.OnnxParser(network, TRT_LOGGER)
@@ -84,35 +83,30 @@ for i in range(network.num_outputs):
 
 
 # --- 設定最佳化設定檔 (Optimization Profile) ---
-# 為了充分利用 RTX 3090 的算力，我們建立一個支援動態批次大小的設定檔
+# [關鍵修改] 為了針對您的 ComfyUI API (一次一張圖) 獲得最快速度，
+# 我們將設定檔從動態改為靜態，將 min, opt, max 全部設為 1。
 profile = builder.create_optimization_profile()
 
-# 設定輸入 'image' 的最小、最佳、最大尺寸
-# 批次大小 (Batch Size) 分別為 1, 2, 4
-img_min_shape = (1, 3, 512, 512)
-img_opt_shape = (2, 3, 512, 512) # 針對 RTX 3090 的最佳批次大小
-img_max_shape = (4, 3, 512, 512)
-profile.set_shape("image", min=img_min_shape, opt=img_opt_shape, max=img_max_shape)
-
-# 設定輸入 'mask' 的最小、最佳、最大尺寸
+# 定義固定尺寸 (批次大小為 1)
+fixed_shape = (1, 3, 512, 512)
+mask_shape = (1, 1, 512, 512)
 mask_input_name = "mask"
-mask_min_shape = (1, 1, 512, 512)
-mask_opt_shape = (2, 1, 512, 512)
-mask_max_shape = (4, 1, 512, 512)
-profile.set_shape(mask_input_name, min=mask_min_shape, opt=mask_opt_shape, max=mask_max_shape)
+
+# 將 'image' 的 min, opt, max 全都設定為固定尺寸
+profile.set_shape("image", min=fixed_shape, opt=fixed_shape, max=fixed_shape)
+# 將 'mask' 的 min, opt, max 全都設定為固定尺寸
+profile.set_shape(mask_input_name, min=mask_shape, opt=mask_shape, max=mask_shape)
 
 config.add_optimization_profile(profile)
 
-print("\n--- 動態尺寸最佳化設定檔 ---")
-print(f"✓ 已為輸入 'image' 和 '{mask_input_name}' 設定動態批次")
-print(f"  - 支援批次大小 (Batch Size): 1 (最小) 至 4 (最大)")
-print(f"  - 已針對批次大小為 2 的情況進行特別優化")
-print(f"  - 解析度固定為 512x512")
+print("\n--- 靜態尺寸最佳化設定檔 ---")
+print(f"✓ 已為輸入 'image' 和 '{mask_input_name}' 設定靜態批次 (Batch Size = 1)")
+print(f"  - 此引擎被高度特化，專為處理單張 512x512 圖片，以達到最低延遲。")
 
 
 # --- 建構並序列化引擎 ---
 print("\n正在建構 TensorRT 引擎... 這可能會需要數分鐘，請耐心等候。")
-print("TensorRT 會自動為您的 RTX 3090 選擇最快的核心 (kernel)...")
+print("TensorRT 會自動為您的 RTX 3090 和固定尺寸選擇最快的核心 (kernel)...")
 
 serialized_engine = builder.build_serialized_network(network, config)
 
@@ -138,11 +132,10 @@ if os.path.exists(ONNX_PATH):
     print(f"  - 原始 ONNX 大小: {onnx_size_mb:.2f} MB")
 
 
-print("\n======================================")
-print("=== RTX 3090 FP16 轉換完成！ ===")
-print("======================================")
-print("這個引擎已針對您的硬體進行以下優化:")
-print("  ✓ FP16 加速: 利用張量核心 (Tensor Cores) 大幅提升推理速度")
-print("  ✓ 記憶體優化: VRAM 佔用率約降低 50%")
-print("  ✓ 動態批次: 可在推理時彈性使用 1-4 的批次大小，無需重新建構")
-print("  ✓ Ampere 架構感知: 充分利用 RTX 30 系列的計算特性")
+print("\n==============================================")
+print("=== RTX 3090 單張圖片處理 - 最終優化完成！ ===")
+print("==============================================")
+print("這個引擎已針對您的硬體和使用情境進行以下優化:")
+print("  ✓ FP16 & TF32 加速: 充分利用 Ampere 架構的計算能力")
+print("  ✓ 最低延遲: 透過靜態尺寸設定，將性能完全集中在單張圖片處理")
+print("  ✓ 穩定性: 啟用嚴格型別模式，確保結果可預測")
