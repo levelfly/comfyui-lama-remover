@@ -20,7 +20,7 @@ class BigLama:
         self.static_inputs_gpu = {}
         self.static_output_gpu = None
 
-        engine_path = get_models_path(filename="lama_fp16_rtx3090.trt")
+        engine_path = get_models_path(filename="lama_fp32.trt")
         print(f"載入 TensorRT 引擎路徑: {engine_path}")
 
         if not os.path.exists(engine_path):
