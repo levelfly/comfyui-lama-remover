@@ -169,3 +169,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+#git clone https://github.com/Carve-Photos/lama.git --depth 1
+#pip install webdataset
+#pip install pytorch_lightning
+#pip install "albumentations==0.4.6"

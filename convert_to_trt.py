@@ -13,7 +13,7 @@ major_version = int(trt_version.split('.')[0])
 print(f"TensorRT 主版本: {major_version}")
 
 # --- 路徑設定 ---
-ONNX_PATH = './ckpts/lama_fp32.onnx'
+ONNX_PATH = './ckpts/lama_fp32_dynamic.onnx'
 
 # ComfyUI TRT 模型目錄設定
 TRT_MODEL_DIR = '/root/ComfyUI/models/trt'
