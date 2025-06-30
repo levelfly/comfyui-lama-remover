@@ -1,9 +1,9 @@
-# /lama/model.py (修正 TensorRT API 相容性問題)
+# /lama/model.py (修正為從 ComfyUI TRT 目錄載入)
 
 import os
+import glob
 import torch
 import tensorrt as trt
-from ..utils import get_models_path
 from comfy.model_management import get_torch_device
 
 DEVICE = get_torch_device()
@@ -20,11 +20,16 @@ class BigLama:
         self.static_inputs_gpu = {}
         self.static_output_gpu = None
 
-        engine_path = get_models_path(filename="lama_fp16_rtx3090_static_bs1.trt")
+        # 從 ComfyUI TRT 模型目錄載入引擎
+        engine_path = self._find_trt_engine()
         print(f"載入 TensorRT 引擎路徑: {engine_path}")
 
-        if not os.path.exists(engine_path):
-            raise FileNotFoundError(f"找不到 TensorRT 引擎檔案: {engine_path}. 請先執行 convert_to_trt.py")
+        if not engine_path or not os.path.exists(engine_path):
+            raise FileNotFoundError(
+                f"找不到 TensorRT 引擎檔案。\n"
+                f"搜尋目錄: /root/ComfyUI/models/trt/\n"
+                f"請先執行 convert_to_trt.py 生成 TensorRT 引擎"
+            )
 
         try:
             with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
@@ -53,6 +58,91 @@ class BigLama:
             print("使用舊版 TensorRT API (get_binding_name)")
 
         print(f"成功發現 {len(self.binding_name_to_idx)} 個綁定: {self.binding_name_to_idx}")
+
+    def _find_trt_engine(self):
+        """
+        在 ComfyUI TRT 目錄中搜尋 LaMa TensorRT 引擎檔案
+        """
+        trt_dir = "/root/ComfyUI/models/trt"
+
+        # 確保目錄存在
+        if not os.path.exists(trt_dir):
+            print(f"❌ TRT 目錄不存在: {trt_dir}")
+            return None
+
+        print(f"🔍 在目錄中搜尋 LaMa TRT 引擎: {trt_dir}")
+
+        # 獲取當前 TensorRT 版本以構建檔案名稱
+        trt_version = trt.__version__
+        major_version = int(trt_version.split('.')[0])
+
+        # 定義可能的檔案名稱（按優先級排序）
+        possible_filenames = [
+            # 1. 最新生成的檔案（包含版本資訊）
+            f"lama_fp16_rtx3090_trt{major_version}x_static_bs1.trt",
+
+            # 2. 其他常見的檔案名稱
+            "lama_fp16_rtx3090_static_bs1.trt",
+            "lama_fp16_rtx3090_trt10x_static_bs1.trt",
+            "lama_fp16_rtx3090_trt9x_static_bs1.trt",
+            "lama_fp16_rtx3090_trt8x_static_bs1.trt",
+
+            # 3. 通用的檔案名稱
+            "lama_fp16.trt",
+            "lama.trt",
+            "lama_tensorrt.trt",
+        ]
+
+        # 搜尋確切檔案名稱
+        for filename in possible_filenames:
+            engine_path = os.path.join(trt_dir, filename)
+            if os.path.exists(engine_path):
+                print(f"✅ 找到 TRT 引擎: {filename}")
+                return engine_path
+
+        # 如果沒找到確切檔案名稱，使用通配符搜尋
+        print("🔍 使用通配符搜尋 LaMa TRT 檔案...")
+
+        wildcard_patterns = [
+            "lama*rtx3090*.trt",
+            "lama*fp16*.trt",
+            "lama*.trt",
+        ]
+
+        for pattern in wildcard_patterns:
+            search_pattern = os.path.join(trt_dir, pattern)
+            matches = glob.glob(search_pattern)
+
+            if matches:
+                # 按檔案修改時間排序，選擇最新的
+                latest_file = max(matches, key=os.path.getmtime)
+                filename = os.path.basename(latest_file)
+                print(f"✅ 通配符找到 TRT 引擎: {filename}")
+                return latest_file
+
+        # 顯示目錄內容供除錯
+        print(f"\n📁 {trt_dir} 目錄內容:")
+        try:
+            files = os.listdir(trt_dir)
+            if not files:
+                print("  (空目錄)")
+            else:
+                for file in sorted(files):
+                    file_path = os.path.join(trt_dir, file)
+                    if os.path.isfile(file_path):
+                        size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                        print(f"  📄 {file} ({size_mb:.1f} MB)")
+                    else:
+                        print(f"  📁 {file}/")
+        except Exception as e:
+            print(f"  ❌ 無法讀取目錄: {e}")
+
+        print(f"\n💡 如果沒有 TRT 引擎檔案，請執行以下步驟:")
+        print(f"  1. 確保 ONNX 模型存在: ./ckpts/lama_fp32.onnx")
+        print(f"  2. 執行轉換腳本: python convert_to_trt.py")
+        print(f"  3. 引擎將自動儲存到: {trt_dir}")
+
+        return None
 
     def _get_tensor_shape(self, tensor_name):
         """獲取張量形狀，相容新舊版本 TensorRT API"""
