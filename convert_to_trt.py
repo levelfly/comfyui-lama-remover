@@ -4,8 +4,8 @@ import tensorrt as trt
 import os
 
 # --- 設定 ---
-ONNX_PATH = './ckpts/lama_fp16.onnx'
-ENGINE_PATH = './ckpts/lama_fp16.trt'
+ONNX_PATH = './ckpts/lama_fp32.onnx'
+ENGINE_PATH = './ckpts/lama_fp32.trt'
 WORKSPACE_GB = 4
 
 print("--- TensorRT Engine Builder (from ONNX) ---")

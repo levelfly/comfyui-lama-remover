@@ -1,10 +1,11 @@
-# /nodes/remover.py (Final Corrected Version)
+# /nodes/remover.py (The Absolute Pinnacle: TRT Engine + Custom CUDA Kernel)
 
 import torch
 import torch.nn.functional as F
 from torchvision import transforms
 from ..lama import model
 
+# [極限融合] 匯入我們自己編譯的 C++/CUDA 擴充模組
 try:
     from lama_cpp import _C as custom_cuda_blur
 
@@ -43,6 +44,7 @@ class LamaRemover:
         for i in range(images_tensor.shape[0]):
             try:
                 image_tensor_single = images_tensor[i].unsqueeze(0)
+
                 current_mask = masks[i]
                 if current_mask.ndim == 3:
                     mask_tensor_single = current_mask[:, :, 0].unsqueeze(0).unsqueeze(0)
@@ -53,7 +55,8 @@ class LamaRemover:
 
                 image_resized_512 = transforms.functional.resize(
                     image_tensor_single, (512, 512),
-                    interpolation=transforms.InterpolationMode.BILINEAR, antialias=True
+                    interpolation=transforms.InterpolationMode.BILINEAR,
+                    antialias=True
                 )
                 mask_resized_512 = transforms.functional.resize(
                     mask_tensor_single, (512, 512),
@@ -66,10 +69,13 @@ class LamaRemover:
                 if invert_mask:
                     mask_gpu_512 = 1.0 - mask_gpu_512
 
+                # --- [極限融合] ---
                 if gaussblur_radius > 0:
                     if LAMA_CPP_AVAILABLE:
+                        # 優先使用我們自己的高速 CUDA 核心進行模糊
                         mask_gpu_512 = custom_cuda_blur.gaussian_blur(mask_gpu_512, gaussblur_radius)
                     else:
+                        # 備用方案：如果自訂模組不存在，才使用 CPU 繞道
                         squeezed_mask_tensor = mask_gpu_512.squeeze()
                         mask_pil = transforms.ToPILImage()(squeezed_mask_tensor.cpu())
                         mask_blurred_pil = mask_pil.filter(ImageFilter.GaussianBlur(radius=gaussblur_radius))
@@ -78,18 +84,14 @@ class LamaRemover:
                 threshold = mask_threshold / 255.0
                 final_mask_gpu = (mask_gpu_512 > threshold).float()
 
-                # 將輸入影像從 [0, 1] 範圍轉換到 [-1, 1] (根據日誌，這一步是正確的)
-                image_gpu_512_norm = image_gpu_512 * 2.0 - 1.0
-
                 # 呼叫 TensorRT 引擎
-                result_gpu_512 = mylama(image_gpu_512_norm, final_mask_gpu)
+                result_gpu_512 = mylama(image_gpu_512, final_mask_gpu)
 
-                ### FINAL DEBUG ###
-                # 根據日誌，模型輸出範圍是 [0, 255]。我們需要將其轉換回 ComfyUI 需要的 [0, 1] 範圍。
-                # 正確的操作是直接除以 255。
-                result_gpu_512 = result_gpu_512 / 255.0
-
-                # 使用 clamp 確保數值穩定在 [0, 1] 範圍內，防止微小的浮點數誤差
+                # 手動歸一化 TensorRT 的輸出
+                min_val = torch.min(result_gpu_512)
+                max_val = torch.max(result_gpu_512)
+                if max_val > min_val:
+                    result_gpu_512 = (result_gpu_512 - min_val) / (max_val - min_val)
                 result_gpu_512 = torch.clamp(result_gpu_512, 0.0, 1.0)
 
                 # 將結果 resize 回原始尺寸
