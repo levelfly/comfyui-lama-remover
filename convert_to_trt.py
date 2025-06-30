@@ -2,6 +2,10 @@
 import tensorrt as trt
 import os
 
+# --- 加入這行來驗證 ---
+print(f"腳本執行當下，實際使用的 TensorRT 版本是: {trt.__version__}")
+# --- 驗證結束 ---
+
 # --- 設定 ---
 ONNX_PATH = './ckpts/lama_fp32.onnx'
 # 檔名清楚標示其為 RTX 3090 專用、靜態 (static) 且批次為 1 (bs1)
