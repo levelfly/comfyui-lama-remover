@@ -170,7 +170,11 @@ def main():
 if __name__ == "__main__":
     main()
 
+#cd /root/ComfyUI/custom_nodes/comfyui-lama-remover/onnx
 #git clone https://github.com/Carve-Photos/lama.git --depth 1
 #pip install webdataset
 #pip install pytorch_lightning
 #pip install "albumentations==0.4.6"
+#python3.11 export_dynamic_onnx.py
+#cd /root/ComfyUI/custom_nodes/comfyui-lama-remover
+#python3.11 convert_to_trt.py
