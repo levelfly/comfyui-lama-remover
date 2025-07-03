@@ -158,14 +158,14 @@ profile = builder.create_optimization_profile()
 
 # 為 "image" 輸入定義尺寸範圍 (Batch, Channels, Height, Width)
 # 注意：長寬最好是 8 的倍數
-min_shape = (1, 3, 256, 256)      # 最小可處理尺寸
-opt_shape = (1, 3, 1024, 1024)      # 預期最佳性能的尺寸
-max_shape = (1, 3, 2560, 2560)    # 最大可處理尺寸 (RTX 3090 可設更高)
+min_shape = (1, 3, 64, 64)      # 最小可處理尺寸
+opt_shape = (1, 3, 512, 512)      # 預期最佳性能的尺寸
+max_shape = (1, 3, 1280, 1280)    # 最大可處理尺寸 (RTX 3090 可設更高)
 
 # 為 "mask" 輸入定義對應的尺寸範圍
-mask_min_shape = (1, 1, 256, 256)
-mask_opt_shape = (1, 1, 1024, 1024)
-mask_max_shape = (1, 1, 2560, 2560)
+mask_min_shape = (1, 1, 64, 64)
+mask_opt_shape = (1, 1, 512, 512)
+mask_max_shape = (1, 1, 1280, 1280)
 mask_input_name = "mask" # 確保與您模型輸入名稱一致
 
 profile.set_shape("image", min=min_shape, opt=opt_shape, max=max_shape)
